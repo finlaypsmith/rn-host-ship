@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -15,6 +18,15 @@ from playwright.sync_api import sync_playwright
 SERVER_URL = os.getenv("SERVER_URL", "").strip()
 HOSTSHIP_LOGIN = os.getenv("HOSTSHIP_LOGIN", "").strip()
 HOSTSHIP_PASSWORD = os.getenv("HOSTSHIP_PASSWORD", "").strip()
+
+# 可选：已登录会话 cookie（Cookie header 字符串或 Chrome 导出的 JSON 数组），
+# 存在时优先复用登录态，绕开登录流程；失效时回退账号密码登录。
+SESSION_COOKIES = os.getenv("SESSION_COOKIES", "").strip()
+
+# 可选：具备 repo 权限的 GitHub PAT。登录成功后用它把最新会话
+# cookie 回写进仓库 secrets 的 SESSION_COOKIES，保持会话持续新鲜。
+GH_TOKEN = os.getenv("GH_TOKEN", "").strip()
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
@@ -267,6 +279,209 @@ def first_visible(page, selectors):
     return None
 
 
+def normalize_cookie(cookie, domain):
+    """Coerce a Chrome-export / raw cookie into a Playwright cookie dict."""
+    c = dict(cookie)
+
+    if "expirationDate" in c:
+        c.setdefault(
+            "expires",
+            c.pop("expirationDate"),
+        )
+
+    if not c.get("domain") and not c.get("url"):
+        c["domain"] = domain
+
+    c.setdefault("path", "/")
+
+    same_site = c.get("sameSite")
+
+    if same_site:
+        mapping = {
+            "no_restriction": "None",
+            "none": "None",
+            "unspecified": "Lax",
+            "lax": "Lax",
+            "strict": "Strict",
+        }
+        c["sameSite"] = mapping.get(
+            str(same_site).lower(),
+            "Lax",
+        )
+
+    if c.get("sameSite") == "None":
+        c["secure"] = True
+
+    return c
+
+
+def parse_session_cookies(raw, domain):
+    """Accept a Cookie header string or a Chrome-exported JSON array."""
+    if not raw:
+        return []
+
+    s = str(raw).strip()
+
+    if not s:
+        return []
+
+    if s.startswith("["):
+        data = json.loads(s)
+
+        if not isinstance(data, list):
+            raise ValueError(
+                "SESSION_COOKIES JSON 必须是数组"
+            )
+
+        return [
+            normalize_cookie(c, domain)
+            for c in data
+            if isinstance(c, dict)
+            and c.get("name")
+            and "value" in c
+        ]
+
+    cookies = []
+
+    for part in s.split(";"):
+        idx = part.find("=")
+
+        if idx <= 0:
+            continue
+
+        cookies.append(
+            normalize_cookie(
+                {
+                    "name": part[:idx].strip(),
+                    "value": part[idx + 1:].strip(),
+                },
+                domain,
+            )
+        )
+
+    return cookies
+
+
+def is_logged_in(page):
+    body = page.locator(
+        "body"
+    ).inner_text().lower()
+
+    return (
+        "/server/" in page.url
+        and "password" not in body
+    )
+
+
+def restore_session(page):
+    """Inject SESSION_COOKIES and reuse the login state if still valid."""
+    if not SESSION_COOKIES:
+        return False
+
+    domain = urlparse(
+        SERVER_URL
+    ).hostname or ""
+
+    try:
+        cookies = parse_session_cookies(
+            SESSION_COOKIES,
+            domain,
+        )
+
+    except Exception as exc:
+        log(
+            "⚠️ SESSION_COOKIES 解析失败: "
+            f"{exc}"
+        )
+        return False
+
+    if not cookies:
+        return False
+
+    log(
+        f"🍪 尝试注入已登录 cookie"
+        f"（{len(cookies)} 个）..."
+    )
+
+    try:
+        page.context.add_cookies(
+            cookies
+        )
+
+    except Exception as exc:
+        log(f"⚠️ 注入 cookie 失败: {exc}")
+        return False
+
+    page.goto(
+        SERVER_URL,
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )
+
+    page.wait_for_timeout(2000)
+
+    if is_logged_in(page):
+        log("✅ 已复用登录态")
+        return True
+
+    log(
+        "⚠️ 注入 cookie 后仍未登录，"
+        "回退账号密码登录"
+    )
+    return False
+
+
+def export_session_cookies(context):
+    """Dump current cookies for the panel domain as JSON (re-consumable by parse_session_cookies)."""
+    return json.dumps(
+        context.cookies(SERVER_URL),
+        ensure_ascii=False,
+    )
+
+
+def update_secret_cookies(context):
+    """Write fresh session cookies back to the SESSION_COOKIES secret via gh CLI."""
+    if not GH_TOKEN or not GITHUB_REPOSITORY:
+        return False
+
+    value = export_session_cookies(context)
+
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "secret",
+                "set",
+                "SESSION_COOKIES",
+                "--repo",
+                GITHUB_REPOSITORY,
+                "--body",
+                "-",
+            ],
+            input=value,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    except Exception as exc:
+        log(f"⚠️ 回写 SESSION_COOKIES 异常: {exc}")
+        return False
+
+    if result.returncode == 0:
+        log(
+            "✅ 已回写 GitHub secret "
+            "SESSION_COOKIES"
+        )
+        return True
+
+    log(
+        "⚠️ 回写 SESSION_COOKIES 失败: "
+        f"{result.stderr.strip()}"
+    )
+    return False
+
+
 def login_if_needed(page):
     page.goto(
         SERVER_URL,
@@ -276,14 +491,7 @@ def login_if_needed(page):
 
     time.sleep(2)
 
-    body = page.locator(
-        "body"
-    ).inner_text().lower()
-
-    if (
-        "/server/" in page.url
-        and "password" not in body
-    ):
+    if is_logged_in(page):
         return True
 
     email = first_visible(
@@ -621,7 +829,7 @@ def main():
         page = context.new_page()
 
         try:
-            if not login_if_needed(page):
+            if not restore_session(page) and not login_if_needed(page):
                 page.screenshot(
                     path="hostship_login_fail.png",
                     full_page=True,
@@ -638,6 +846,8 @@ def main():
                 return 1
 
             log("✅ 登录成功")
+
+            update_secret_cookies(context)
 
             before = get_renewal_text(page)
 

@@ -52,6 +52,12 @@ jobs:
           HOSTSHIP_LOGIN: ${{ secrets.HOSTSHIP_LOGIN }}
           HOSTSHIP_PASSWORD: ${{ secrets.HOSTSHIP_PASSWORD }}
 
+          # 可选：已登录会话 cookie，优先复用登录态，失效时回退账号密码
+          SESSION_COOKIES: ${{ secrets.SESSION_COOKIES }}
+
+          # 可选：具备 repo 权限的 GitHub Token，用于登录成功后回写 SESSION_COOKIES
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 

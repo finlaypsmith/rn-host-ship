@@ -55,6 +55,32 @@ Telegram Bot Token。
 
 ### 可选
 
+`SESSION_COOKIES`
+
+已登录会话 cookie，脚本会优先注入复用登录态（绕开登录流程），失效时自动回退账号密码登录。支持两种格式：
+
+Cookie header 字符串（一行）：
+
+```
+laravel_session=xxx; XSRF-TOKEN=xxx; remember_web_xxx=xxx
+```
+
+或 cookie 导出扩展生成的 JSON 数组（含 `name` / `value` / `domain` / `expirationDate` 等字段）。
+
+获取方式：
+
+1. 本地浏览器正常登录 `https://panel.host-ship.com`。
+2. DevTools → Application → Cookies → 选中 `https://panel.host-ship.com`。
+3. 复制关键 cookie 拼成一行，或用扩展导出 JSON。
+
+> 推荐使用 `SESSION_COOKIES`：最稳定，且能绕开登录环节可能遇到的安全验证。
+
+`GH_TOKEN`
+
+具备 `repo` 权限的 GitHub Personal Access Token（classic），用于登录成功后把最新会话 cookie 回写进 `SESSION_COOKIES` secret，保持会话持续有效。可选：不配置则每次仍用固定的 `SESSION_COOKIES` / 账号密码登录。
+
+> Actions 默认的 `github.token` 无权写 secrets，所以回写必须单独提供一个 PAT 并命名为 `GH_TOKEN`。
+
 `NODE_LINK`
 
 代理节点完整分享链接，例如：
