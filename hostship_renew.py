@@ -455,8 +455,6 @@ def update_secret_cookies(context):
                 "SESSION_COOKIES",
                 "--repo",
                 GITHUB_REPOSITORY,
-                "--body",
-                "-",
             ],
             input=value,
             capture_output=True,
