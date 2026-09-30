@@ -9,22 +9,21 @@ on:
     # UTC 00:00 = 北京时间 08:00
     - cron: "0 0 * * *"
 
-permissions:
-  contents: read
-
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
@@ -32,19 +31,12 @@ jobs:
           pip install playwright requests "requests[socks]"
           python -m playwright install --with-deps chromium
 
-      - name: Setup optional VLESS/VMess/Trojan node
+      - name: ⚙ 设置代理 (自动选择 sing-box / Xray)
+        continue-on-error: true
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          if [ -n "$NODE_LINK" ]; then
-            echo "NODE_LINK detected, setting up local proxy..."
-
-            bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-
-          else
-            echo "IS_PROXY=false" >> "$GITHUB_ENV"
-            echo "No NODE_LINK, direct connection will be used."
-          fi
+          bash <(wget -qO- https://gist.githubusercontent.com/janver/c5dcc485bb25a43568cb33ac3cb49efd/raw/setup_p.sh)
 
       - name: Run renew
         env:
@@ -81,4 +73,21 @@ jobs:
         if: always()
         run: |
           pkill -f sing-box || true
-          rm -f sing-box sing-box-config.json sing-box.log || true
+          pkill -f 'xray run' || true
+          rm -f sing-box sing-box-config.json sing-box.log
+          rm -f xray xray-config.json xray.log
+
+      - name: 🧹 清理旧的工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
